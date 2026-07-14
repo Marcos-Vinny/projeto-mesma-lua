@@ -926,12 +926,25 @@ export default function App() {
             )}
 
             {viewingStar.message && (
-              <p
-                style={{ fontFamily: "'Cormorant Garamond', serif", fontStyle: "italic", color: TEXT_SOFT }}
-                className="text-lg leading-snug mb-4"
-              >
-                "{viewingStar.message}"
-              </p>
+             <div
+  className="mb-4 overflow-y-auto whitespace-pre-wrap"
+  style={{
+    maxHeight: "220px",
+    overflowWrap: "break-word",
+    wordBreak: "break-all",
+  }}
+>
+  <p
+    style={{
+      fontFamily: "'Cormorant Garamond', serif",
+      fontStyle: "italic",
+      color: TEXT_SOFT,
+    }}
+    className="text-lg leading-snug"
+  >
+    "{viewingStar.message}"
+  </p>
+</div>
             )}
             <p style={{ color: TEXT_DIM, fontFamily: "'Space Mono', monospace" }} className="text-[11px] mb-3">
               {viewingStar.author} · {timeAgoPt(viewingStar.created_at)}
