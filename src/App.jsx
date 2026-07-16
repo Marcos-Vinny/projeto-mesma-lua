@@ -206,7 +206,8 @@ export default function App() {
   }
 
   // ---- drag-to-pan (mouse e toque, via Pointer Events) ----
-  const DRAG_THRESHOLD = 6; // px — abaixo disso, conta como clique/toque
+  const DRAG_THRESHOLD_MOUSE = 6; // px — abaixo disso, conta como clique
+  const DRAG_THRESHOLD_TOUCH = 16; // px — o dedo treme mais que o mouse, então damos mais folga
 
   function handleSkyPointerDown(e) {
     if (composing) return;
@@ -218,6 +219,17 @@ export default function App() {
     // ponteiro — deixa o próprio onClick do botão cuidar disso.
     const uiControl = e.target.closest && e.target.closest("[data-ui-control]");
     if (uiControl) return;
+
+    // FIX: no toque, isso evita que o navegador gere um "clique fantasma"
+    // logo depois — que poderia cair em cima do card recém-aberto e fechá-lo,
+    // dando a impressão de que a estrela só "pisca" na tela.
+    if (e.pointerType !== "mouse") {
+      try {
+        e.preventDefault();
+      } catch (err) {
+        // ignore
+      }
+    }
 
     const container = skyContainerRef.current;
     if (!container) return;
@@ -235,6 +247,7 @@ export default function App() {
       moved: false,
       startedStarId,
       pointerId: e.pointerId,
+      threshold: e.pointerType === "mouse" ? DRAG_THRESHOLD_MOUSE : DRAG_THRESHOLD_TOUCH,
     };
 
     try {
@@ -252,7 +265,7 @@ export default function App() {
     const dx = e.clientX - drag.startX;
     const dy = e.clientY - drag.startY;
 
-    if (!drag.moved && Math.abs(dx) + Math.abs(dy) > DRAG_THRESHOLD) {
+    if (!drag.moved && Math.abs(dx) + Math.abs(dy) > drag.threshold) {
       drag.moved = true;
     }
 
@@ -264,6 +277,7 @@ export default function App() {
       }
     }
   }
+
 
   function endSkyDrag(e) {
     const drag = dragRef.current;
