@@ -8,6 +8,9 @@ import {
   Menu as MenuIcon,
   MapPin,
   Trash2,
+  Maximize2,
+  Minimize2,
+  RefreshCw,
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -92,7 +95,8 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [viewingStar, setViewingStar] = useState(null);
   const [errorMsg, setErrorMsg] = useState(null);
-
+  const [fullscreenSky, setFullscreenSky] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   // ---- menu flutuante + lista de estrelas ----
   const [menuOpen, setMenuOpen] = useState(false);
   const [starsListOpen, setStarsListOpen] = useState(false);
@@ -208,6 +212,12 @@ export default function App() {
     if (composing) return;
     // só arrasta com botão principal do mouse (ou toque/caneta, que não têm "button")
     if (e.pointerType === "mouse" && e.button !== 0) return;
+
+    // FIX: se o toque/clique começou em cima de um controle de UI (botões de
+    // tela cheia, atualizar, menu etc.), não inicia o pan nem captura o
+    // ponteiro — deixa o próprio onClick do botão cuidar disso.
+    const uiControl = e.target.closest && e.target.closest("[data-ui-control]");
+    if (uiControl) return;
 
     const container = skyContainerRef.current;
     if (!container) return;
@@ -360,10 +370,6 @@ export default function App() {
     setDeletingId(id);
     setErrorMsg(null);
 
-    // FIX: pedimos .select() de volta pra saber se alguma linha foi REALMENTE
-    // apagada. Se o RLS da tabela não tiver policy de DELETE, o Supabase
-    // responde sem erro mas com 0 linhas afetadas — e a estrela "volta" depois
-    // que a página recarrega, porque nunca saiu do banco de verdade.
     const { data, error } = await supabase
       .from(STARS_TABLE)
       .delete()
@@ -382,6 +388,23 @@ export default function App() {
     }
     setDeletingId(null);
     setConfirmDeleteId(null);
+  }
+
+  async function refreshStars() {
+    setRefreshing(true);
+
+    const { data, error } = await supabase
+      .from(STARS_TABLE)
+      .select("*")
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      setErrorMsg("Não consegui atualizar o céu.");
+    } else {
+      setStars(data || []);
+    }
+
+    setRefreshing(false);
   }
 
   // ---- localizar estrela no céu ----
@@ -543,13 +566,56 @@ export default function App() {
         onPointerUp={handleSkyPointerUp}
         onPointerCancel={handleSkyPointerCancel}
         onPointerLeave={handleSkyPointerCancel}
-        className="flex-1 relative mx-4 mb-3 rounded-3xl overflow-auto no-scrollbar"
+        className={`overflow-auto no-scrollbar ${
+          fullscreenSky
+            ? "fixed inset-0 z-50 rounded-none"
+            : "flex-1 relative mx-4 mb-3 rounded-3xl"
+        }`}
         style={{
           border: `1px solid ${NIGHT_SOFT}`,
           touchAction: "none",
           cursor: isPanning ? "grabbing" : "grab",
+          background: NIGHT_DEEP,
         }}
       >
+        {/* Botões de fullscreen e refresh: ficam FORA do skyRef (o div que arrasta),
+            como filho direto do container. Assim eles não se movem junto com o pan. */}
+        <div className="absolute top-3 right-3 z-20 flex gap-2">
+          <button
+            data-ui-control="true"
+            onClick={(e) => {
+              e.stopPropagation();
+              setFullscreenSky(!fullscreenSky);
+            }}
+            className="w-9 h-9 rounded-full flex items-center justify-center"
+            style={{
+              background: "rgba(10,14,42,0.75)",
+              border: `1px solid ${NIGHT_SOFT}`,
+              color: TEXT_SOFT,
+            }}
+            aria-label={fullscreenSky ? "sair da tela cheia" : "tela cheia"}
+          >
+            {fullscreenSky ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+          </button>
+          <button
+            data-ui-control="true"
+            onClick={(e) => {
+              e.stopPropagation();
+              refreshStars();
+            }}
+            disabled={refreshing}
+            className="w-9 h-9 rounded-full flex items-center justify-center"
+            style={{
+              background: "rgba(10,14,42,0.75)",
+              border: `1px solid ${NIGHT_SOFT}`,
+              color: TEXT_SOFT,
+            }}
+            aria-label="atualizar céu"
+          >
+            <RefreshCw size={16} className={refreshing ? "animate-spin" : ""} />
+          </button>
+        </div>
+
         <div
           ref={skyRef}
           className="relative"
@@ -593,8 +659,6 @@ export default function App() {
               data-star-btn="true"
               data-star-id={s.id}
               onClick={(e) => {
-                // Mantido como fallback (ex: ativação via teclado). Em cliques de
-                // mouse/toque normais, quem abre o painel é o endSkyDrag acima.
                 e.stopPropagation();
                 setViewingStar(s);
               }}
@@ -926,25 +990,25 @@ export default function App() {
             )}
 
             {viewingStar.message && (
-             <div
-  className="mb-4 overflow-y-auto whitespace-pre-wrap"
-  style={{
-    maxHeight: "220px",
-    overflowWrap: "break-word",
-    wordBreak: "break-all",
-  }}
->
-  <p
-    style={{
-      fontFamily: "'Cormorant Garamond', serif",
-      fontStyle: "italic",
-      color: TEXT_SOFT,
-    }}
-    className="text-lg leading-snug"
-  >
-    "{viewingStar.message}"
-  </p>
-</div>
+              <div
+                className="mb-4 overflow-y-auto whitespace-pre-wrap"
+                style={{
+                  maxHeight: "220px",
+                  overflowWrap: "break-word",
+                  wordBreak: "break-all",
+                }}
+              >
+                <p
+                  style={{
+                    fontFamily: "'Cormorant Garamond', serif",
+                    fontStyle: "italic",
+                    color: TEXT_SOFT,
+                  }}
+                  className="text-lg leading-snug"
+                >
+                  "{viewingStar.message}"
+                </p>
+              </div>
             )}
             <p style={{ color: TEXT_DIM, fontFamily: "'Space Mono', monospace" }} className="text-[11px] mb-3">
               {viewingStar.author} · {timeAgoPt(viewingStar.created_at)}
