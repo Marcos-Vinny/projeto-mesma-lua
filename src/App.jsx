@@ -560,33 +560,106 @@ export default function App() {
 
       {/* Sky (drag-to-pan: arraste com o mouse/dedo pra mover o céu) */}
       <div
-        ref={skyContainerRef}
-        onPointerDown={handleSkyPointerDown}
-        onPointerMove={handleSkyPointerMove}
-        onPointerUp={handleSkyPointerUp}
-        onPointerCancel={handleSkyPointerCancel}
-        onPointerLeave={handleSkyPointerCancel}
-        className={`overflow-auto no-scrollbar ${
+        className={
           fullscreenSky
-            ? "fixed inset-0 z-50 rounded-none"
-            : "flex-1 relative mx-4 mb-3 rounded-3xl"
-        }`}
-        style={{
-          border: `1px solid ${NIGHT_SOFT}`,
-          touchAction: "none",
-          cursor: isPanning ? "grabbing" : "grab",
-          background: NIGHT_DEEP,
-        }}
+            ? "fixed inset-0 z-20"
+            : "flex-1 relative mx-4 mb-3"
+        }
       >
-        {/* Botões de fullscreen e refresh: ficam FORA do skyRef (o div que arrasta),
-            como filho direto do container. Assim eles não se movem junto com o pan. */}
-        <div className="absolute top-3 right-3 z-20 flex gap-2">
-          <button
-            data-ui-control="true"
-            onClick={(e) => {
-              e.stopPropagation();
-              setFullscreenSky(!fullscreenSky);
+        <div
+          ref={skyContainerRef}
+          onPointerDown={handleSkyPointerDown}
+          onPointerMove={handleSkyPointerMove}
+          onPointerUp={handleSkyPointerUp}
+          onPointerCancel={handleSkyPointerCancel}
+          onPointerLeave={handleSkyPointerCancel}
+          className={`absolute inset-0 overflow-auto no-scrollbar ${
+            fullscreenSky ? "rounded-none" : "rounded-3xl"
+          }`}
+          style={{
+            border: `1px solid ${NIGHT_SOFT}`,
+            touchAction: "none",
+            cursor: isPanning ? "grabbing" : "grab",
+            background: NIGHT_DEEP,
+          }}
+        >
+          <div
+            ref={skyRef}
+            className="relative"
+            style={{
+              width: "180%",
+              height: "180%",
+              minHeight: "100%",
+              minWidth: "100%",
+              background: `linear-gradient(180deg, transparent, ${NIGHT_MID}55)`,
             }}
+          >
+          {ambientStars.map((s, i) => (
+            <div
+              key={i}
+              className="twinkle absolute rounded-full pointer-events-none"
+              style={{
+                left: `${s.left}%`,
+                top: `${s.top}%`,
+                width: s.size,
+                height: s.size,
+                background: TEXT_SOFT,
+                animationDelay: `${s.delay}s`,
+              }}
+            />
+          ))}
+
+          {stars.length === 0 && !composing && (
+            <p
+              style={{ color: TEXT_DIM, fontFamily: "'Cormorant Garamond', serif", fontStyle: "italic" }}
+              className="absolute inset-0 flex items-center justify-center text-center px-10 text-lg pointer-events-none"
+            >
+              toque em qualquer lugar do céu pra guardar a primeira estrela
+            </p>
+          )}
+
+          {stars.map((s) => {
+            const isHighlighted = highlightedStarId === s.id;
+            return (
+              <button
+                key={s.id}
+                data-star-btn="true"
+                data-star-id={s.id}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setViewingStar(s);
+                }}
+                className="absolute"
+                style={{
+                  left: `${s.x}%`,
+                  top: `${s.y}%`,
+                  transform: `translate(-50%, -50%) scale(${isHighlighted ? 1.9 : 1})`,
+                  transition: "transform 0.45s ease",
+                  zIndex: isHighlighted ? 5 : 1,
+                }}
+                aria-label="ver estrela"
+              >
+                <Star
+                  size={16}
+                  style={{
+                    color: GOLD,
+                    fill: GOLD,
+                    filter: isHighlighted
+                      ? "drop-shadow(0 0 14px rgba(231,183,95,1))"
+                      : "drop-shadow(0 0 4px rgba(231,183,95,0.7))",
+                  }}
+                />
+              </button>
+            );
+          })}
+          </div>
+        </div>
+
+        {/* Botões de tela cheia e atualizar: fora do container que rola,
+            então ficam sempre estáticos no canto, mesmo arrastando o céu. */}
+        <div className="absolute top-3 left-3 z-10 flex gap-2">
+          <button
+            onClick={() => setFullscreenSky(!fullscreenSky)}
             className="w-9 h-9 rounded-full flex items-center justify-center"
             style={{
               background: "rgba(10,14,42,0.75)",
@@ -598,11 +671,7 @@ export default function App() {
             {fullscreenSky ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
           </button>
           <button
-            data-ui-control="true"
-            onClick={(e) => {
-              e.stopPropagation();
-              refreshStars();
-            }}
+            onClick={refreshStars}
             disabled={refreshing}
             className="w-9 h-9 rounded-full flex items-center justify-center"
             style={{
@@ -614,77 +683,6 @@ export default function App() {
           >
             <RefreshCw size={16} className={refreshing ? "animate-spin" : ""} />
           </button>
-        </div>
-
-        <div
-          ref={skyRef}
-          className="relative"
-          style={{
-            width: "180%",
-            height: "180%",
-            minHeight: "100%",
-            minWidth: "100%",
-            background: `linear-gradient(180deg, transparent, ${NIGHT_MID}55)`,
-          }}
-        >
-        {ambientStars.map((s, i) => (
-          <div
-            key={i}
-            className="twinkle absolute rounded-full pointer-events-none"
-            style={{
-              left: `${s.left}%`,
-              top: `${s.top}%`,
-              width: s.size,
-              height: s.size,
-              background: TEXT_SOFT,
-              animationDelay: `${s.delay}s`,
-            }}
-          />
-        ))}
-
-        {stars.length === 0 && !composing && (
-          <p
-            style={{ color: TEXT_DIM, fontFamily: "'Cormorant Garamond', serif", fontStyle: "italic" }}
-            className="absolute inset-0 flex items-center justify-center text-center px-10 text-lg pointer-events-none"
-          >
-            toque em qualquer lugar do céu pra guardar a primeira estrela
-          </p>
-        )}
-
-        {stars.map((s) => {
-          const isHighlighted = highlightedStarId === s.id;
-          return (
-            <button
-              key={s.id}
-              data-star-btn="true"
-              data-star-id={s.id}
-              onClick={(e) => {
-                e.stopPropagation();
-                setViewingStar(s);
-              }}
-              className="absolute"
-              style={{
-                left: `${s.x}%`,
-                top: `${s.y}%`,
-                transform: `translate(-50%, -50%) scale(${isHighlighted ? 1.9 : 1})`,
-                transition: "transform 0.45s ease",
-                zIndex: isHighlighted ? 5 : 1,
-              }}
-              aria-label="ver estrela"
-            >
-              <Star
-                size={16}
-                style={{
-                  color: GOLD,
-                  fill: GOLD,
-                  filter: isHighlighted
-                    ? "drop-shadow(0 0 14px rgba(231,183,95,1))"
-                    : "drop-shadow(0 0 4px rgba(231,183,95,0.7))",
-                }}
-              />
-            </button>
-          );
-        })}
         </div>
       </div>
 
