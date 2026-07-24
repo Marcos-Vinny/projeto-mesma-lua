@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import * as Astronomy from "astronomy-engine";
 import {
   Star,
   X,
@@ -11,6 +12,8 @@ import {
   Maximize2,
   Minimize2,
   RefreshCw,
+  Sparkles,
+  Plus,
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -26,29 +29,195 @@ const TEXT_DIM = "#7C84B8";
 const DANGER = "#D96C6C";
 
 const STARS_TABLE = "stars";
+const SKY_EVENTS_TABLE = "sky_events";
 const PHOTOS_BUCKET = "star-photos";
 const NAME_KEY = "mesmalua-my-name";
 
-// ---------- Moon phase math ----------
-function getMoonPhase(date) {
-  const synodic = 29.53058867;
-  const knownNewMoon = Date.UTC(2000, 0, 6, 18, 14, 0);
-  const diffDays = (date.getTime() - knownNewMoon) / 86400000;
-  const age = ((diffDays % synodic) + synodic) % synodic;
-  const illumination = (1 - Math.cos((2 * Math.PI * age) / synodic)) / 2;
-  const isWaxing = age < synodic / 2;
+// ---------- Motor astronômico: fase exata + eventos especiais ----------
+// Usa a lib astronomy-engine (cálculo real de posição/órbita, sem API externa).
+
+// Limiares populares (não existe definição "oficial" única) pra super/micro lua:
+// lua cheia/nova mais perto que isso da Terra = "super"; mais longe = "micro".
+const SUPERMOON_MAX_KM = 361000;
+const MICROMOON_MIN_KM = 405000;
+// Janela angular (graus) pra considerar que a lua está "exatamente" numa fase principal.
+const PHASE_EXACT_WINDOW_DEG = 6;
+// Janela de tempo pra considerar que um evento (lua cheia, eclipse etc.) é "hoje".
+const TODAY_WINDOW_MS = 18 * 60 * 60 * 1000;
+
+// Nomes populares da lua cheia por mês (folclore norte-americano, amplamente
+// usado também em português — não tem correspondência oficial sazonal no
+// hemisfério sul, mas é o que a maioria dos sites em PT-BR usa mesmo assim).
+const FULL_MOON_NAMES = [
+  "Lua do Lobo",
+  "Lua da Neve",
+  "Lua da Minhoca",
+  "Lua Rosa",
+  "Lua das Flores",
+  "Lua do Morango",
+  "Lua do Cervo",
+  "Lua do Esturjão",
+  "Lua da Colheita",
+  "Lua do Caçador",
+  "Lua do Castor",
+  "Lua Fria",
+];
+
+function moonDistanceKm(date) {
+  const vec = Astronomy.GeoVector(Astronomy.Body.Moon, date, true);
+  const distAU = Math.sqrt(vec.x * vec.x + vec.y * vec.y + vec.z * vec.z);
+  return distAU * Astronomy.KM_PER_AU;
+}
+
+// Estado atual da lua: fase exata (via ângulo eclíptico), iluminação e distância.
+function computeMoonNow(date) {
+  const illum = Astronomy.Illumination(Astronomy.Body.Moon, date);
+  const phaseDeg = Astronomy.MoonPhase(date);
+  const isWaxing = phaseDeg < 180;
+
+  const angularDist = (a, b) => Math.min(Math.abs(a - b), 360 - Math.abs(a - b));
 
   let name;
-  if (age < 1.84566 || age >= 27.68493) name = "Lua Nova";
-  else if (age < 5.53699) name = "Lua Crescente";
-  else if (age < 9.22831) name = "Quarto Crescente";
-  else if (age < 12.91963) name = "Gibosa Crescente";
-  else if (age < 16.61096) name = "Lua Cheia";
-  else if (age < 20.30228) name = "Gibosa Minguante";
-  else if (age < 23.99361) name = "Quarto Minguante";
+  if (angularDist(phaseDeg, 0) <= PHASE_EXACT_WINDOW_DEG) name = "Lua Nova";
+  else if (angularDist(phaseDeg, 90) <= PHASE_EXACT_WINDOW_DEG) name = "Quarto Crescente";
+  else if (angularDist(phaseDeg, 180) <= PHASE_EXACT_WINDOW_DEG) name = "Lua Cheia";
+  else if (angularDist(phaseDeg, 270) <= PHASE_EXACT_WINDOW_DEG) name = "Quarto Minguante";
+  else if (phaseDeg < 90) name = "Lua Crescente";
+  else if (phaseDeg < 180) name = "Gibosa Crescente";
+  else if (phaseDeg < 270) name = "Gibosa Minguante";
   else name = "Lua Minguante";
 
-  return { illumination, isWaxing, name };
+  return {
+    illumination: illum.phase_fraction,
+    isWaxing,
+    name,
+    distanceKm: moonDistanceKm(date),
+  };
+}
+
+// Junta os eventos de lua nova (quarter 0) e cheia (quarter 2) num intervalo
+// de dias ao redor de `date`, pra poder detectar lua azul/negra por mês.
+function collectQuarterEvents(date, daysBack, daysForward) {
+  const start = new Date(date.getTime() - daysBack * 86400000);
+  const end = new Date(date.getTime() + daysForward * 86400000);
+  const events = [];
+  let q = Astronomy.SearchMoonQuarter(start);
+  let guard = 0;
+  while (q.time.date <= end && guard < 40) {
+    events.push(q);
+    q = Astronomy.NextMoonQuarter(q);
+    guard++;
+  }
+  return events;
+}
+
+function monthKey(d) {
+  return `${d.getUTCFullYear()}-${d.getUTCMonth()}`;
+}
+
+// Calcula: próxima lua cheia (com selos de super/micro/azul), próxima lua
+// nova (com selo de negra), próximo eclipse lunar, próximo perigeu/apogeu,
+// e uma lista de "destaques de hoje" pra badges perto da lua.
+function computeMoonHighlights(date) {
+  const quarters = collectQuarterEvents(date, 40, 65);
+  const fullMoons = quarters.filter((q) => q.quarter === 2);
+  const newMoons = quarters.filter((q) => q.quarter === 0);
+
+  function tagSecondInMonth(list) {
+    const seen = {};
+    return list.map((q) => {
+      const key = monthKey(q.time.date);
+      seen[key] = (seen[key] || 0) + 1;
+      return { ...q, isSecondInMonth: seen[key] >= 2 };
+    });
+  }
+  const taggedFull = tagSecondInMonth(fullMoons);
+  const taggedNew = tagSecondInMonth(newMoons);
+
+  function withSuperMicro(q) {
+    const dist = moonDistanceKm(q.time.date);
+    return {
+      date: q.time.date,
+      distanceKm: dist,
+      isSuper: dist <= SUPERMOON_MAX_KM,
+      isMicro: dist >= MICROMOON_MIN_KM,
+    };
+  }
+
+  const now = date.getTime();
+  const nextFullQ =
+    taggedFull.find((q) => q.time.date.getTime() >= now) || taggedFull[taggedFull.length - 1];
+  const nextNewQ =
+    taggedNew.find((q) => q.time.date.getTime() >= now) || taggedNew[taggedNew.length - 1];
+
+  const nextFullMoon = nextFullQ
+    ? {
+        ...withSuperMicro(nextFullQ),
+        isBlueMoon: nextFullQ.isSecondInMonth,
+        folkloreName: FULL_MOON_NAMES[nextFullQ.time.date.getUTCMonth()],
+      }
+    : null;
+
+  const nextNewMoon = nextNewQ
+    ? { ...withSuperMicro(nextNewQ), isBlackMoon: nextNewQ.isSecondInMonth }
+    : null;
+
+  let nextEclipse = null;
+  try {
+    const ecl = Astronomy.SearchLunarEclipse(date);
+    nextEclipse = { kind: ecl.kind, date: ecl.peak.date };
+  } catch (e) {
+    nextEclipse = null;
+  }
+
+  let nextApsis = null;
+  try {
+    const apsis = Astronomy.SearchLunarApsis(date);
+    nextApsis = {
+      kind: apsis.kind === Astronomy.ApsisKind.Pericenter ? "perigeu" : "apogeu",
+      date: apsis.time.date,
+      distanceKm: apsis.dist_km,
+    };
+  } catch (e) {
+    nextApsis = null;
+  }
+
+  const todayHighlights = [];
+  if (nextFullMoon && Math.abs(nextFullMoon.date.getTime() - now) <= TODAY_WINDOW_MS) {
+    todayHighlights.push(
+      nextFullMoon.isSuper ? "Super Lua Cheia" : nextFullMoon.isMicro ? "Micro Lua" : "Lua Cheia"
+    );
+    if (nextFullMoon.isBlueMoon) todayHighlights.push("Lua Azul");
+  }
+  if (nextNewMoon && Math.abs(nextNewMoon.date.getTime() - now) <= TODAY_WINDOW_MS) {
+    todayHighlights.push("Lua Nova");
+    if (nextNewMoon.isBlackMoon) todayHighlights.push("Lua Negra");
+  }
+  if (nextEclipse && Math.abs(nextEclipse.date.getTime() - now) <= TODAY_WINDOW_MS) {
+    const kindPt =
+      nextEclipse.kind === "total"
+        ? "Eclipse Lunar Total (Lua de Sangue)"
+        : nextEclipse.kind === "partial"
+        ? "Eclipse Lunar Parcial"
+        : "Eclipse Lunar Penumbral";
+    todayHighlights.push(kindPt);
+  }
+
+  return { nextFullMoon, nextNewMoon, nextEclipse, nextApsis, todayHighlights };
+}
+
+function eclipseKindPt(kind) {
+  if (kind === "total") return "Eclipse Total (Lua de Sangue)";
+  if (kind === "partial") return "Eclipse Parcial";
+  return "Eclipse Penumbral";
+}
+
+function formatDateShortPt(d) {
+  try {
+    return new Intl.DateTimeFormat("pt-BR", { day: "numeric", month: "long" }).format(d);
+  } catch (e) {
+    return d.toLocaleDateString();
+  }
 }
 
 function formatDatePt(d) {
@@ -74,6 +243,48 @@ function timeAgoPt(iso) {
   if (months < 12) return `há ${months} ${months === 1 ? "mês" : "meses"}`;
   const years = Math.floor(months / 12);
   return `há ${years} ${years === 1 ? "ano" : "anos"}`;
+}
+
+// yyyy-mm-dd local, pra comparar com as colunas date do Supabase
+function todayIsoDate() {
+  const d = new Date();
+  const tzOffsetMs = d.getTimezoneOffset() * 60000;
+  return new Date(d.getTime() - tzOffsetMs).toISOString().slice(0, 10);
+}
+
+// ---------- Ícone desenhado de cometa (SVG) ----------
+function CometIcon({ size = 26 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" fill="none">
+      <defs>
+        <linearGradient id="cometTail" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor={GOLD} stopOpacity="0" />
+          <stop offset="100%" stopColor={GOLD} stopOpacity="0.85" />
+        </linearGradient>
+      </defs>
+      <path
+        d="M2 4 C 10 8, 16 14, 22 20"
+        stroke="url(#cometTail)"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        fill="none"
+        opacity="0.75"
+      />
+      <path
+        d="M6 2 C 12 7, 17 12, 21 18"
+        stroke="url(#cometTail)"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        fill="none"
+        opacity="0.5"
+      />
+      <circle cx="24" cy="22" r="4.2" fill={GOLD} />
+      <circle cx="24" cy="22" r="4.2" fill={GOLD} opacity="0.35">
+        <animate attributeName="r" values="4.2;6;4.2" dur="2.4s" repeatCount="indefinite" />
+        <animate attributeName="opacity" values="0.35;0;0.35" dur="2.4s" repeatCount="indefinite" />
+      </circle>
+    </svg>
+  );
 }
 
 export default function App() {
@@ -104,6 +315,17 @@ export default function App() {
   const [deletingId, setDeletingId] = useState(null);
   const [highlightedStarId, setHighlightedStarId] = useState(null);
 
+  // ---- eventos do céu (cometas etc., cadastrados manualmente) ----
+  const [skyEvents, setSkyEvents] = useState([]);
+  const [skyEventsOpen, setSkyEventsOpen] = useState(false);
+  const [cometInfoOpen, setCometInfoOpen] = useState(false);
+  const [eventForm, setEventForm] = useState({ name: "", comment: "", start_date: "", end_date: "" });
+  const [editingEventId, setEditingEventId] = useState(null);
+  const [savingEvent, setSavingEvent] = useState(false);
+  const [confirmDeleteEventId, setConfirmDeleteEventId] = useState(null);
+  const [deletingEventId, setDeletingEventId] = useState(null);
+  const [eventFormError, setEventFormError] = useState(null);
+
   // ---- drag-to-pan ----
   const [isPanning, setIsPanning] = useState(false);
   const dragRef = useRef(null);
@@ -118,8 +340,16 @@ export default function App() {
     return () => clearTimeout(t);
   }, [errorMsg]);
 
-  const moon = useMemo(() => getMoonPhase(new Date()), []);
+  const moon = useMemo(() => computeMoonNow(new Date()), []);
+  const moonHighlights = useMemo(() => computeMoonHighlights(new Date()), []);
   const overlayTranslate = (moon.isWaxing ? 1 : -1) * moon.illumination * 100;
+
+  const todayStr = useMemo(() => todayIsoDate(), []);
+  const activeSkyEvent = useMemo(() => {
+    return (
+      skyEvents.find((ev) => ev.start_date <= todayStr && todayStr <= ev.end_date) || null
+    );
+  }, [skyEvents, todayStr]);
 
   const ambientStars = useMemo(() => {
     return Array.from({ length: 36 }, () => ({
@@ -176,6 +406,53 @@ export default function App() {
     };
   }, []);
 
+  // Load sky events (cometas etc.) + realtime
+  useEffect(() => {
+    let mounted = true;
+
+    async function loadEvents() {
+      const { data, error } = await supabase
+        .from(SKY_EVENTS_TABLE)
+        .select("*")
+        .order("start_date", { ascending: true });
+      if (!mounted) return;
+      if (!error) setSkyEvents(data || []);
+    }
+    loadEvents();
+
+    const channel = supabase
+      .channel("sky-events-realtime")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: SKY_EVENTS_TABLE },
+        (payload) => {
+          setSkyEvents((prev) =>
+            prev.some((e) => e.id === payload.new.id) ? prev : [...prev, payload.new]
+          );
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: SKY_EVENTS_TABLE },
+        (payload) => {
+          setSkyEvents((prev) => prev.map((e) => (e.id === payload.new.id ? payload.new : e)));
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "DELETE", schema: "public", table: SKY_EVENTS_TABLE },
+        (payload) => {
+          setSkyEvents((prev) => prev.filter((e) => e.id !== payload.old.id));
+        }
+      )
+      .subscribe();
+
+    return () => {
+      mounted = false;
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
   function submitName(e) {
     e.preventDefault();
     const trimmed = nameDraft.trim();
@@ -211,18 +488,11 @@ export default function App() {
 
   function handleSkyPointerDown(e) {
     if (composing) return;
-    // só arrasta com botão principal do mouse (ou toque/caneta, que não têm "button")
     if (e.pointerType === "mouse" && e.button !== 0) return;
 
-    // FIX: se o toque/clique começou em cima de um controle de UI (botões de
-    // tela cheia, atualizar, menu etc.), não inicia o pan nem captura o
-    // ponteiro — deixa o próprio onClick do botão cuidar disso.
     const uiControl = e.target.closest && e.target.closest("[data-ui-control]");
     if (uiControl) return;
 
-    // FIX: no toque, isso evita que o navegador gere um "clique fantasma"
-    // logo depois — que poderia cair em cima do card recém-aberto e fechá-lo,
-    // dando a impressão de que a estrela só "pisca" na tela.
     if (e.pointerType !== "mouse") {
       try {
         e.preventDefault();
@@ -234,8 +504,6 @@ export default function App() {
     const container = skyContainerRef.current;
     if (!container) return;
 
-    // FIX: em vez de só saber "começou numa estrela", guardamos QUAL estrela foi,
-    // porque depois do setPointerCapture o onClick nativo do botão não dispara mais.
     const starEl = e.target.closest && e.target.closest("[data-star-btn]");
     const startedStarId = starEl ? starEl.getAttribute("data-star-id") : null;
 
@@ -278,7 +546,6 @@ export default function App() {
     }
   }
 
-
   function endSkyDrag(e) {
     const drag = dragRef.current;
     dragRef.current = null;
@@ -296,12 +563,9 @@ export default function App() {
 
     if (!drag.moved) {
       if (drag.startedStarId != null) {
-        // FIX: como o click nativo não chega mais no botão (pointer capture),
-        // abrimos o painel da estrela manualmente aqui.
         const star = stars.find((s) => String(s.id) === String(drag.startedStarId));
         if (star) setViewingStar(star);
       } else {
-        // foi um clique/toque no céu vazio -> cria estrela
         handleSkyClickAt(e.clientX, e.clientY);
       }
     }
@@ -440,6 +704,98 @@ export default function App() {
     setTimeout(() => setHighlightedStarId(null), 2200);
   }
 
+  // ---- eventos do céu (cometas etc.) ----
+  function openNewEventForm() {
+    setEditingEventId(null);
+    setEventForm({ name: "", comment: "", start_date: todayStr, end_date: todayStr });
+    setEventFormError(null);
+  }
+
+  function startEditEvent(ev) {
+    setEditingEventId(ev.id);
+    setEventForm({
+      name: ev.name || "",
+      comment: ev.comment || "",
+      start_date: ev.start_date || todayStr,
+      end_date: ev.end_date || todayStr,
+    });
+    setEventFormError(null);
+  }
+
+  async function submitEventForm(e) {
+    e.preventDefault();
+    setEventFormError(null);
+    const name = eventForm.name.trim();
+    if (!name) {
+      setEventFormError("Dá um nome pro evento.");
+      return;
+    }
+    if (!eventForm.start_date || !eventForm.end_date) {
+      setEventFormError("Preenche as duas datas.");
+      return;
+    }
+    if (eventForm.end_date < eventForm.start_date) {
+      setEventFormError("A data final não pode ser antes da inicial.");
+      return;
+    }
+
+    setSavingEvent(true);
+    const payload = {
+      name,
+      comment: eventForm.comment.trim() || null,
+      start_date: eventForm.start_date,
+      end_date: eventForm.end_date,
+    };
+
+    let error, data;
+    if (editingEventId) {
+      ({ data, error } = await supabase
+        .from(SKY_EVENTS_TABLE)
+        .update(payload)
+        .eq("id", editingEventId)
+        .select()
+        .single());
+    } else {
+      ({ data, error } = await supabase
+        .from(SKY_EVENTS_TABLE)
+        .insert(payload)
+        .select()
+        .single());
+    }
+
+    if (error) {
+      setEventFormError("Não deu pra salvar agora. Tenta de novo.");
+    } else if (!data) {
+      setEventFormError(
+        "Salvou, mas não recebi confirmação de volta (verifica as policies de SELECT no Supabase)."
+      );
+    } else {
+      setSkyEvents((prev) => {
+        const exists = prev.some((e) => e.id === data.id);
+        return exists ? prev.map((e) => (e.id === data.id ? data : e)) : [...prev, data];
+      });
+      setEditingEventId(null);
+      setEventForm({ name: "", comment: "", start_date: "", end_date: "" });
+    }
+    setSavingEvent(false);
+  }
+
+  async function deleteSkyEvent(id) {
+    setDeletingEventId(id);
+    const { data, error } = await supabase
+      .from(SKY_EVENTS_TABLE)
+      .delete()
+      .eq("id", id)
+      .select();
+    if (error || !data || data.length === 0) {
+      setErrorMsg("Não deu pra apagar esse evento agora.");
+    } else {
+      setSkyEvents((prev) => prev.filter((e) => e.id !== id));
+    }
+    setDeletingEventId(null);
+    setConfirmDeleteEventId(null);
+  }
+
   const earliestDate = useMemo(() => {
     if (stars.length === 0) return null;
     const min = stars.reduce(
@@ -454,6 +810,10 @@ export default function App() {
       (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
     );
   }, [stars]);
+
+  const sortedEventsForList = useMemo(() => {
+    return [...skyEvents].sort((a, b) => (a.start_date < b.start_date ? 1 : -1));
+  }, [skyEvents]);
 
   if (loading) {
     return (
@@ -541,35 +901,94 @@ export default function App() {
       </div>
 
       {/* Moon */}
-      <div className="flex flex-col items-center shrink-0 py-3">
-        <div
-          style={{
-            width: 108,
-            height: 108,
-            borderRadius: "50%",
-            background: MOON_COLOR,
-            boxShadow: `0 0 50px 6px rgba(231,183,95,0.22)`,
-            position: "relative",
-            overflow: "hidden",
-          }}
-        >
+      <div className="flex flex-col items-center shrink-0 py-3 relative">
+        <div className="relative">
           <div
             style={{
-              position: "absolute",
-              inset: 0,
+              width: 108,
+              height: 108,
               borderRadius: "50%",
-              background: NIGHT_DEEP,
-              transform: `translateX(${overlayTranslate}%)`,
-              transition: "transform 0.6s ease",
+              background: MOON_COLOR,
+              boxShadow: `0 0 50px 6px rgba(231,183,95,0.22)`,
+              position: "relative",
+              overflow: "hidden",
             }}
-          />
+          >
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                borderRadius: "50%",
+                background: NIGHT_DEEP,
+                transform: `translateX(${overlayTranslate}%)`,
+                transition: "transform 0.6s ease",
+              }}
+            />
+          </div>
+
+          {/* Cometa: só aparece se tiver um evento ativo hoje */}
+          {activeSkyEvent && (
+            <button
+              data-ui-control="true"
+              onClick={() => setCometInfoOpen((v) => !v)}
+              className="absolute"
+              style={{ top: -10, right: -14 }}
+              aria-label="ver evento do céu"
+            >
+              <CometIcon size={30} />
+            </button>
+          )}
+
+          {activeSkyEvent && cometInfoOpen && (
+            <>
+              <div className="fixed inset-0 z-30" onClick={() => setCometInfoOpen(false)} />
+              <div
+                className="absolute z-40 w-56 rounded-xl p-3"
+                style={{
+                  top: -6,
+                  left: "calc(100% + 6px)",
+                  background: NIGHT_MID,
+                  border: `1px solid ${NIGHT_SOFT}`,
+                  boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+                }}
+              >
+                <p style={{ color: GOLD }} className="text-sm font-medium mb-1">
+                  {activeSkyEvent.name}
+                </p>
+                {activeSkyEvent.comment && (
+                  <p style={{ color: TEXT_SOFT }} className="text-xs leading-snug">
+                    {activeSkyEvent.comment}
+                  </p>
+                )}
+              </div>
+            </>
+          )}
         </div>
+
         <p style={{ color: TEXT_SOFT, fontFamily: "'Cormorant Garamond', serif", fontStyle: "italic" }} className="mt-3 text-lg">
           {moon.name}
         </p>
         <p style={{ color: TEXT_DIM, fontFamily: "'Space Mono', monospace" }} className="text-[11px] mt-0.5">
           {Math.round(moon.illumination * 100)}% iluminada · a mesma que ela vê aí
         </p>
+
+        {moonHighlights.todayHighlights.length > 0 && (
+          <div className="flex flex-wrap justify-center gap-1.5 mt-2 px-6">
+            {moonHighlights.todayHighlights.map((h, i) => (
+              <span
+                key={i}
+                style={{
+                  background: "rgba(231,183,95,0.12)",
+                  border: `1px solid ${GOLD}55`,
+                  color: GOLD,
+                }}
+                className="text-[10px] px-2 py-1 rounded-full"
+              >
+                ✨ {h}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Sky (drag-to-pan: arraste com o mouse/dedo pra mover o céu) */}
@@ -673,6 +1092,7 @@ export default function App() {
             então ficam sempre estáticos no canto, mesmo arrastando o céu. */}
         <div className="absolute top-3 left-3 z-10 flex gap-2">
           <button
+            data-ui-control="true"
             onClick={() => setFullscreenSky(!fullscreenSky)}
             className="w-9 h-9 rounded-full flex items-center justify-center"
             style={{
@@ -685,6 +1105,7 @@ export default function App() {
             {fullscreenSky ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
           </button>
           <button
+            data-ui-control="true"
             onClick={refreshStars}
             disabled={refreshing}
             className="w-9 h-9 rounded-full flex items-center justify-center"
@@ -832,6 +1253,23 @@ export default function App() {
             <button
               onClick={() => {
                 setMenuOpen(false);
+                openNewEventForm();
+                setSkyEventsOpen(true);
+              }}
+              className="flex items-center gap-2 pl-3 pr-4 py-2 rounded-full text-xs font-medium whitespace-nowrap"
+              style={{
+                background: NIGHT_MID,
+                color: TEXT_SOFT,
+                border: `1px solid ${NIGHT_SOFT}`,
+                boxShadow: "0 4px 16px rgba(0,0,0,0.35)",
+              }}
+            >
+              <Sparkles size={13} style={{ color: GOLD }} />
+              eventos do céu
+            </button>
+            <button
+              onClick={() => {
+                setMenuOpen(false);
                 setStarsListOpen(true);
               }}
               className="flex items-center gap-2 pl-3 pr-4 py-2 rounded-full text-xs font-medium whitespace-nowrap"
@@ -966,6 +1404,267 @@ export default function App() {
                   )}
                 </div>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* modal de eventos do céu (cometas manuais + destaques lunares calculados) */}
+      {skyEventsOpen && (
+        <div
+          className="absolute inset-0 z-40 flex items-end sm:items-center justify-center px-4 pb-4 sm:px-6"
+          style={{ background: "rgba(10,14,42,0.85)" }}
+          onClick={() => {
+            setSkyEventsOpen(false);
+            setConfirmDeleteEventId(null);
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm rounded-2xl p-4 flex flex-col"
+            style={{ background: NIGHT_MID, border: `1px solid ${NIGHT_SOFT}`, maxHeight: "84vh" }}
+          >
+            <div className="flex items-center justify-between mb-3 shrink-0">
+              <p
+                style={{ fontFamily: "'Cormorant Garamond', serif", fontStyle: "italic", color: MOON_COLOR }}
+                className="text-xl"
+              >
+                Eventos do céu
+              </p>
+              <button
+                onClick={() => {
+                  setSkyEventsOpen(false);
+                  setConfirmDeleteEventId(null);
+                }}
+                style={{ color: TEXT_DIM }}
+                aria-label="fechar"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="overflow-y-auto flex flex-col gap-4 pr-1">
+              {/* Destaques calculados (automáticos, sem manutenção) */}
+              <div className="flex flex-col gap-2">
+                <p style={{ color: TEXT_DIM }} className="text-[10px] uppercase tracking-wider">
+                  calculado automaticamente
+                </p>
+
+                {moonHighlights.nextFullMoon && (
+                  <div
+                    className="rounded-xl px-3 py-2"
+                    style={{ background: NIGHT_DEEP, border: `1px solid ${NIGHT_SOFT}` }}
+                  >
+                    <p style={{ color: TEXT_SOFT }} className="text-xs">
+                      🌕 Próxima lua cheia: {formatDateShortPt(moonHighlights.nextFullMoon.date)} —{" "}
+                      {moonHighlights.nextFullMoon.folkloreName}
+                    </p>
+                    {(moonHighlights.nextFullMoon.isSuper ||
+                      moonHighlights.nextFullMoon.isMicro ||
+                      moonHighlights.nextFullMoon.isBlueMoon) && (
+                      <p style={{ color: GOLD }} className="text-[10px] mt-1">
+                        {moonHighlights.nextFullMoon.isSuper && "Super Lua "}
+                        {moonHighlights.nextFullMoon.isMicro && "Micro Lua "}
+                        {moonHighlights.nextFullMoon.isBlueMoon && "· Lua Azul"}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {moonHighlights.nextNewMoon && (
+                  <div
+                    className="rounded-xl px-3 py-2"
+                    style={{ background: NIGHT_DEEP, border: `1px solid ${NIGHT_SOFT}` }}
+                  >
+                    <p style={{ color: TEXT_SOFT }} className="text-xs">
+                      🌑 Próxima lua nova: {formatDateShortPt(moonHighlights.nextNewMoon.date)}
+                    </p>
+                    {moonHighlights.nextNewMoon.isBlackMoon && (
+                      <p style={{ color: GOLD }} className="text-[10px] mt-1">
+                        Lua Negra
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {moonHighlights.nextEclipse && (
+                  <div
+                    className="rounded-xl px-3 py-2"
+                    style={{ background: NIGHT_DEEP, border: `1px solid ${NIGHT_SOFT}` }}
+                  >
+                    <p style={{ color: TEXT_SOFT }} className="text-xs">
+                      🌘 Próximo eclipse lunar: {formatDateShortPt(moonHighlights.nextEclipse.date)} —{" "}
+                      {eclipseKindPt(moonHighlights.nextEclipse.kind)}
+                    </p>
+                  </div>
+                )}
+
+                {moonHighlights.nextApsis && (
+                  <div
+                    className="rounded-xl px-3 py-2"
+                    style={{ background: NIGHT_DEEP, border: `1px solid ${NIGHT_SOFT}` }}
+                  >
+                    <p style={{ color: TEXT_SOFT }} className="text-xs">
+                      🌙 Próximo {moonHighlights.nextApsis.kind}: {formatDateShortPt(moonHighlights.nextApsis.date)} (
+                      {Math.round(moonHighlights.nextApsis.distanceKm).toLocaleString("pt-BR")} km)
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Eventos manuais (cometas etc.) */}
+              <div className="flex flex-col gap-2">
+                <p style={{ color: TEXT_DIM }} className="text-[10px] uppercase tracking-wider">
+                  cadastrados por vocês
+                </p>
+
+                {sortedEventsForList.length === 0 && (
+                  <p style={{ color: TEXT_DIM }} className="text-xs text-center py-2">
+                    nenhum evento cadastrado ainda
+                  </p>
+                )}
+
+                {sortedEventsForList.map((ev) => (
+                  <div
+                    key={ev.id}
+                    className="rounded-xl px-3 py-2"
+                    style={{ background: NIGHT_DEEP, border: `1px solid ${NIGHT_SOFT}` }}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p style={{ color: TEXT_SOFT }} className="text-xs font-medium truncate">
+                          ☄️ {ev.name}
+                        </p>
+                        {ev.comment && (
+                          <p style={{ color: TEXT_DIM }} className="text-[11px] mt-0.5">
+                            {ev.comment}
+                          </p>
+                        )}
+                        <p
+                          style={{ color: TEXT_DIM, fontFamily: "'Space Mono', monospace" }}
+                          className="text-[10px] mt-1"
+                        >
+                          {formatDateShortPt(new Date(ev.start_date + "T12:00:00"))} até{" "}
+                          {formatDateShortPt(new Date(ev.end_date + "T12:00:00"))}
+                        </p>
+                      </div>
+
+                      {confirmDeleteEventId === ev.id ? (
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            onClick={() => setConfirmDeleteEventId(null)}
+                            style={{ color: TEXT_DIM }}
+                            className="text-[10px] px-1"
+                          >
+                            não
+                          </button>
+                          <button
+                            onClick={() => deleteSkyEvent(ev.id)}
+                            disabled={deletingEventId === ev.id}
+                            style={{ background: DANGER, color: "#fff" }}
+                            className="text-[10px] px-2 py-1 rounded-full flex items-center gap-1"
+                          >
+                            {deletingEventId === ev.id && (
+                              <Loader2 size={10} className="animate-spin" />
+                            )}
+                            sim
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            onClick={() => startEditEvent(ev)}
+                            aria-label="editar evento"
+                            style={{ color: LAVENDER }}
+                            className="p-1"
+                          >
+                            <Pencil size={13} />
+                          </button>
+                          <button
+                            onClick={() => setConfirmDeleteEventId(ev.id)}
+                            aria-label="apagar evento"
+                            style={{ color: TEXT_DIM }}
+                            className="p-1"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Form de novo evento / edição */}
+              <form
+                onSubmit={submitEventForm}
+                className="flex flex-col gap-2 rounded-xl p-3"
+                style={{ background: NIGHT_DEEP, border: `1px solid ${NIGHT_SOFT}` }}
+              >
+                <p style={{ color: TEXT_DIM }} className="text-[10px] uppercase tracking-wider mb-1">
+                  {editingEventId ? "editar evento" : "novo evento"}
+                </p>
+                <input
+                  value={eventForm.name}
+                  onChange={(e) => setEventForm((f) => ({ ...f, name: e.target.value }))}
+                  placeholder="nome (ex: Cometa Halley)"
+                  style={{ background: NIGHT_MID, border: `1px solid ${NIGHT_SOFT}`, color: TEXT_SOFT }}
+                  className="w-full rounded-lg px-3 py-2 text-xs outline-none"
+                />
+                <textarea
+                  value={eventForm.comment}
+                  onChange={(e) => setEventForm((f) => ({ ...f, comment: e.target.value }))}
+                  placeholder="comentário (opcional)"
+                  rows={2}
+                  style={{ background: NIGHT_MID, border: `1px solid ${NIGHT_SOFT}`, color: TEXT_SOFT }}
+                  className="w-full rounded-lg px-3 py-2 text-xs outline-none resize-none"
+                />
+                <div className="flex gap-2">
+                  <input
+                    type="date"
+                    value={eventForm.start_date}
+                    onChange={(e) => setEventForm((f) => ({ ...f, start_date: e.target.value }))}
+                    style={{ background: NIGHT_MID, border: `1px solid ${NIGHT_SOFT}`, color: TEXT_SOFT }}
+                    className="flex-1 rounded-lg px-2 py-2 text-xs outline-none"
+                  />
+                  <input
+                    type="date"
+                    value={eventForm.end_date}
+                    onChange={(e) => setEventForm((f) => ({ ...f, end_date: e.target.value }))}
+                    style={{ background: NIGHT_MID, border: `1px solid ${NIGHT_SOFT}`, color: TEXT_SOFT }}
+                    className="flex-1 rounded-lg px-2 py-2 text-xs outline-none"
+                  />
+                </div>
+
+                {eventFormError && (
+                  <p style={{ color: DANGER }} className="text-[11px]">
+                    {eventFormError}
+                  </p>
+                )}
+
+                <div className="flex justify-end gap-2 mt-1">
+                  {editingEventId && (
+                    <button
+                      type="button"
+                      onClick={openNewEventForm}
+                      style={{ color: TEXT_DIM }}
+                      className="text-xs px-3 py-1.5"
+                    >
+                      cancelar edição
+                    </button>
+                  )}
+                  <button
+                    type="submit"
+                    disabled={savingEvent}
+                    style={{ background: GOLD, color: NIGHT_DEEP }}
+                    className="text-xs px-3 py-1.5 rounded-full font-medium flex items-center gap-1.5 disabled:opacity-60"
+                  >
+                    {savingEvent && <Loader2 size={12} className="animate-spin" />}
+                    <Plus size={12} />
+                    {editingEventId ? "salvar" : "adicionar"}
+                  </button>
+                </div>
+              </form>
             </div>
           </div>
         </div>
