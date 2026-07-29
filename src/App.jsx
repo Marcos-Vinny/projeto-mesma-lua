@@ -1796,7 +1796,7 @@ export default function App() {
                 style={{
                   maxHeight: "220px",
                   overflowWrap: "break-word",
-                  wordBreak: "break-all",
+              
                 }}
               >
                 <p
