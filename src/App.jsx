@@ -14,6 +14,7 @@ import {
   RefreshCw,
   Sparkles,
   Plus,
+  Bell,
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -30,8 +31,23 @@ const DANGER = "#D96C6C";
 
 const STARS_TABLE = "stars";
 const SKY_EVENTS_TABLE = "sky_events";
+const PUSH_SUBSCRIPTIONS_TABLE = "push_subscriptions";
 const PHOTOS_BUCKET = "star-photos";
 const NAME_KEY = "mesmalua-my-name";
+
+// Chave pública do Web Push (não é segredo, pode ficar no front). A chave
+// PRIVADA fica só no servidor (Supabase Edge Function), nunca aqui.
+const VAPID_PUBLIC_KEY =
+  "BDtwtVx4VrWHt4yJrNpa7KUpI4Ayu5AyQxtHymxj5jacb2XX4oAPCV1BG9knVOj6HAIBJSGtuLJyd5Ywn1ynurE";
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) outputArray[i] = rawData.charCodeAt(i);
+  return outputArray;
+}
 
 // ---------- Motor astronômico: fase exata + eventos especiais ----------
 // Usa a lib astronomy-engine (cálculo real de posição/órbita, sem API externa).
@@ -326,6 +342,10 @@ export default function App() {
   const [deletingEventId, setDeletingEventId] = useState(null);
   const [eventFormError, setEventFormError] = useState(null);
 
+  // ---- notificações push ----
+  // "unsupported" | "default" | "denied" | "granted" | "subscribing" | "error"
+  const [notifStatus, setNotifStatus] = useState("checking");
+
   // ---- drag-to-pan ----
   const [isPanning, setIsPanning] = useState(false);
   const dragRef = useRef(null);
@@ -452,6 +472,58 @@ export default function App() {
       supabase.removeChannel(channel);
     };
   }, []);
+
+  // Checa se já tem permissão/inscrição de notificação ao abrir o app
+  useEffect(() => {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+      setNotifStatus("unsupported");
+      return;
+    }
+    if (Notification.permission === "denied") {
+      setNotifStatus("denied");
+      return;
+    }
+    navigator.serviceWorker
+      .getRegistration()
+      .then((reg) => (reg ? reg.pushManager.getSubscription() : null))
+      .then((sub) => setNotifStatus(sub ? "granted" : "default"))
+      .catch(() => setNotifStatus("default"));
+  }, []);
+
+  async function enableNotifications() {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+      setNotifStatus("unsupported");
+      return;
+    }
+    setNotifStatus("subscribing");
+    try {
+      const reg = await navigator.serviceWorker.register("/sw.js");
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") {
+        setNotifStatus(permission); // "denied" ou "default"
+        return;
+      }
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+        });
+      }
+      const { error } = await supabase.from(PUSH_SUBSCRIPTIONS_TABLE).upsert(
+        {
+          endpoint: sub.endpoint,
+          subscription: sub.toJSON(),
+          owner_name: name,
+        },
+        { onConflict: "endpoint" }
+      );
+      if (error) throw error;
+      setNotifStatus("granted");
+    } catch (e) {
+      setNotifStatus("error");
+    }
+  }
 
   function submitName(e) {
     e.preventDefault();
@@ -1250,6 +1322,24 @@ export default function App() {
       <div className="fixed z-40" style={{ right: 20, bottom: 84 }}>
         {menuOpen && (
           <div className="absolute bottom-14 right-0 flex flex-col items-end gap-2">
+            {notifStatus !== "granted" && notifStatus !== "unsupported" && (
+              <button
+                onClick={() => {
+                  setMenuOpen(false);
+                  enableNotifications();
+                }}
+                className="flex items-center gap-2 pl-3 pr-4 py-2 rounded-full text-xs font-medium whitespace-nowrap"
+                style={{
+                  background: NIGHT_MID,
+                  color: TEXT_SOFT,
+                  border: `1px solid ${NIGHT_SOFT}`,
+                  boxShadow: "0 4px 16px rgba(0,0,0,0.35)",
+                }}
+              >
+                <Bell size={13} style={{ color: GOLD }} />
+                {notifStatus === "subscribing" ? "ativando..." : "ativar notificações"}
+              </button>
+            )}
             <button
               onClick={() => {
                 setMenuOpen(false);
