@@ -1440,7 +1440,8 @@ export default function App() {
 
                   <div className="flex-1 min-w-0">
                     <p style={{ color: TEXT_SOFT }} className="text-xs truncate">
-                      {s.message ? s.message : s.photo_url ? "📷 foto sem legenda" : "sem mensagem"}
+                      {s.photo_url && "📷 "}
+                      {s.message ? s.message : s.photo_url ? "foto" : "sem mensagem"}
                     </p>
                     <p
                       style={{ color: TEXT_DIM, fontFamily: "'Space Mono', monospace" }}
